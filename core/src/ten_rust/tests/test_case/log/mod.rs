@@ -15,36 +15,30 @@ mod tests {
         bindings::ten_rust_free_cstring,
         log::{
             bindings::ten_rust_create_log_config_from_json,
-            reloadable::ten_configure_log_reloadable, ten_log,
-            AdvancedLogConfig, AdvancedLogEmitter, AdvancedLogFormatter,
-            AdvancedLogHandler, AdvancedLogLevel, AdvancedLogMatcher,
-            ConsoleEmitterConfig, FileEmitterConfig, FormatterType, LogLevel,
-            StreamType,
+            decrypt::decrypt_records_bytes,
+            encryption::{AesCtrParams, EncryptionConfig, EncryptionParams},
+            reloadable::ten_configure_log_reloadable,
+            ten_log, AdvancedLogConfig, AdvancedLogEmitter, AdvancedLogFormatter,
+            AdvancedLogHandler, AdvancedLogLevel, AdvancedLogMatcher, ConsoleEmitterConfig,
+            FileEmitterConfig, FormatterType, LogLevel, StreamType,
         },
     };
     use tracing::{debug, info, trace};
 
-    fn read_with_backoff(
-        path: &str,
-        max_retries: u32,
-    ) -> Result<String, std::io::Error> {
+    fn read_with_backoff(path: &str, max_retries: u32) -> Result<String, std::io::Error> {
         let mut retry_count = 0;
 
         while retry_count < max_retries {
             match fs::read_to_string(path) {
                 Ok(content) if !content.is_empty() => return Ok(content),
                 Ok(_) => {
-                    thread::sleep(Duration::from_millis(
-                        100 * (retry_count + 1) as u64,
-                    ));
+                    thread::sleep(Duration::from_millis(100 * (retry_count + 1) as u64));
                     retry_count += 1;
                     continue;
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::NotFound {
-                        thread::sleep(Duration::from_millis(
-                            100 * (retry_count + 1) as u64,
-                        ));
+                        thread::sleep(Duration::from_millis(100 * (retry_count + 1) as u64));
                         retry_count += 1;
                         continue;
                     }
@@ -82,16 +76,12 @@ mod tests {
 
         let log_config_ptr = unsafe {
             let c_string = std::ffi::CString::new(log_config_json).unwrap();
-            ten_rust_create_log_config_from_json(
-                c_string.as_ptr(),
-                &mut err_msg,
-            )
+            ten_rust_create_log_config_from_json(c_string.as_ptr(), &mut err_msg)
         };
 
         if !err_msg.is_null() {
             unsafe {
-                let error_string =
-                    std::ffi::CStr::from_ptr(err_msg).to_string_lossy();
+                let error_string = std::ffi::CStr::from_ptr(err_msg).to_string_lossy();
                 println!("Error message: {error_string}");
 
                 ten_rust_free_cstring(err_msg);
@@ -101,8 +91,7 @@ mod tests {
 
         assert!(!log_config_ptr.is_null());
 
-        let log_config =
-            unsafe { Box::from_raw(log_config_ptr as *mut AdvancedLogConfig) };
+        let log_config = unsafe { Box::from_raw(log_config_ptr as *mut AdvancedLogConfig) };
 
         assert_eq!(log_config.handlers.len(), 1);
         assert_eq!(log_config.handlers[0].matchers.len(), 1);
@@ -119,6 +108,7 @@ mod tests {
             log_config.handlers[0].emitter,
             AdvancedLogEmitter::Console(ConsoleEmitterConfig {
                 stream: StreamType::Stdout,
+                encryption: None,
             })
         );
     }
@@ -140,6 +130,7 @@ mod tests {
             },
             emitter: AdvancedLogEmitter::File(FileEmitterConfig {
                 path: path.to_string(),
+                encryption: None,
             }),
         }]);
 
@@ -205,8 +196,7 @@ mod tests {
         ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
 
         // Read log file content with backoff strategy
-        let content = read_with_backoff(path, 5)
-            .expect("Failed to read log file after retries");
+        let content = read_with_backoff(path, 0).expect("Failed to read log file after retries");
 
         println!("Log file content:\n{content}");
 
@@ -227,20 +217,20 @@ mod tests {
     #[test]
     #[serial]
     fn test_formatter_plain_colored() {
-        let plain_colored_config =
-            AdvancedLogConfig::new(vec![AdvancedLogHandler {
-                matchers: vec![AdvancedLogMatcher {
-                    level: AdvancedLogLevel::Trace, // Allow all log levels
-                    category: None,
-                }],
-                formatter: AdvancedLogFormatter {
-                    formatter_type: FormatterType::Plain,
-                    colored: Some(true),
-                },
-                emitter: AdvancedLogEmitter::Console(ConsoleEmitterConfig {
-                    stream: StreamType::Stdout,
-                }),
-            }]);
+        let plain_colored_config = AdvancedLogConfig::new(vec![AdvancedLogHandler {
+            matchers: vec![AdvancedLogMatcher {
+                level: AdvancedLogLevel::Trace, // Allow all log levels
+                category: None,
+            }],
+            formatter: AdvancedLogFormatter {
+                formatter_type: FormatterType::Plain,
+                colored: Some(true),
+            },
+            emitter: AdvancedLogEmitter::Console(ConsoleEmitterConfig {
+                stream: StreamType::Stdout,
+                encryption: None,
+            }),
+        }]);
 
         ten_configure_log_reloadable(&plain_colored_config).unwrap();
         // Test different log levels to see different colors
@@ -296,20 +286,20 @@ mod tests {
     #[test]
     #[serial]
     fn test_formatter_plain_no_color() {
-        let plain_no_color_config =
-            AdvancedLogConfig::new(vec![AdvancedLogHandler {
-                matchers: vec![AdvancedLogMatcher {
-                    level: AdvancedLogLevel::Info,
-                    category: None,
-                }],
-                formatter: AdvancedLogFormatter {
-                    formatter_type: FormatterType::Plain,
-                    colored: Some(false),
-                },
-                emitter: AdvancedLogEmitter::Console(ConsoleEmitterConfig {
-                    stream: StreamType::Stdout,
-                }),
-            }]);
+        let plain_no_color_config = AdvancedLogConfig::new(vec![AdvancedLogHandler {
+            matchers: vec![AdvancedLogMatcher {
+                level: AdvancedLogLevel::Info,
+                category: None,
+            }],
+            formatter: AdvancedLogFormatter {
+                formatter_type: FormatterType::Plain,
+                colored: Some(false),
+            },
+            emitter: AdvancedLogEmitter::Console(ConsoleEmitterConfig {
+                stream: StreamType::Stdout,
+                encryption: None,
+            }),
+        }]);
 
         ten_configure_log_reloadable(&plain_no_color_config).unwrap();
 
@@ -340,6 +330,7 @@ mod tests {
             },
             emitter: AdvancedLogEmitter::Console(ConsoleEmitterConfig {
                 stream: StreamType::Stdout,
+                encryption: None,
             }),
         }]);
 
@@ -371,6 +362,7 @@ mod tests {
             },
             emitter: AdvancedLogEmitter::Console(ConsoleEmitterConfig {
                 stream: StreamType::Stdout,
+                encryption: None,
             }),
         }]);
 
@@ -414,6 +406,7 @@ mod tests {
             },
             emitter: AdvancedLogEmitter::Console(ConsoleEmitterConfig {
                 stream: StreamType::Stdout,
+                encryption: None,
             }),
         }]);
 
@@ -445,6 +438,7 @@ mod tests {
             },
             emitter: AdvancedLogEmitter::Console(ConsoleEmitterConfig {
                 stream: StreamType::Stderr,
+                encryption: None,
             }),
         }]);
 
@@ -468,20 +462,20 @@ mod tests {
         let temp_file = tempfile::NamedTempFile::new().unwrap();
         let test_file = temp_file.path().to_str().unwrap();
 
-        let file_plain_config =
-            AdvancedLogConfig::new(vec![AdvancedLogHandler {
-                matchers: vec![AdvancedLogMatcher {
-                    level: AdvancedLogLevel::Info,
-                    category: None,
-                }],
-                formatter: AdvancedLogFormatter {
-                    formatter_type: FormatterType::Plain,
-                    colored: Some(false),
-                },
-                emitter: AdvancedLogEmitter::File(FileEmitterConfig {
-                    path: test_file.to_string(),
-                }),
-            }]);
+        let file_plain_config = AdvancedLogConfig::new(vec![AdvancedLogHandler {
+            matchers: vec![AdvancedLogMatcher {
+                level: AdvancedLogLevel::Info,
+                category: None,
+            }],
+            formatter: AdvancedLogFormatter {
+                formatter_type: FormatterType::Plain,
+                colored: Some(false),
+            },
+            emitter: AdvancedLogEmitter::File(FileEmitterConfig {
+                path: test_file.to_string(),
+                encryption: None,
+            }),
+        }]);
 
         ten_configure_log_reloadable(&file_plain_config).unwrap();
         ten_log(
@@ -510,8 +504,8 @@ mod tests {
         // Force flush logs
         ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
 
-        let content = read_with_backoff(test_file, 5)
-            .expect("Failed to read log file after retries");
+        let content =
+            read_with_backoff(test_file, 0).expect("Failed to read log file after retries");
         println!("File content:\n{content}");
 
         assert!(
@@ -530,20 +524,20 @@ mod tests {
         let temp_file = tempfile::NamedTempFile::new().unwrap();
         let test_file = temp_file.path().to_str().unwrap();
 
-        let file_json_config =
-            AdvancedLogConfig::new(vec![AdvancedLogHandler {
-                matchers: vec![AdvancedLogMatcher {
-                    level: AdvancedLogLevel::Debug,
-                    category: None,
-                }],
-                formatter: AdvancedLogFormatter {
-                    formatter_type: FormatterType::Json,
-                    colored: Some(true),
-                },
-                emitter: AdvancedLogEmitter::File(FileEmitterConfig {
-                    path: test_file.to_string(),
-                }),
-            }]);
+        let file_json_config = AdvancedLogConfig::new(vec![AdvancedLogHandler {
+            matchers: vec![AdvancedLogMatcher {
+                level: AdvancedLogLevel::Debug,
+                category: None,
+            }],
+            formatter: AdvancedLogFormatter {
+                formatter_type: FormatterType::Json,
+                colored: Some(true),
+            },
+            emitter: AdvancedLogEmitter::File(FileEmitterConfig {
+                path: test_file.to_string(),
+                encryption: None,
+            }),
+        }]);
 
         ten_configure_log_reloadable(&file_json_config).unwrap();
         ten_log(
@@ -561,8 +555,8 @@ mod tests {
         // Force flush logs
         ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
 
-        let json_content = read_with_backoff(test_file, 5)
-            .expect("Failed to read log file after retries");
+        let json_content =
+            read_with_backoff(test_file, 0).expect("Failed to read log file after retries");
         println!("JSON file content:\n{json_content}");
 
         assert!(
@@ -576,13 +570,223 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_file_reopen_after_rename() {
+        use tempfile::tempdir;
+
+        // Ensure clean state
+        ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
+
+        let dir = tempdir().expect("create temp dir");
+        let original_path = dir.path().join("reopen_test.log");
+        let rotated_path = dir.path().join("reopen_test.log.rotated");
+        let original_path_str = original_path.to_str().unwrap().to_string();
+
+        let mut config = AdvancedLogConfig::new(vec![AdvancedLogHandler {
+            matchers: vec![AdvancedLogMatcher {
+                level: AdvancedLogLevel::Info,
+                category: None,
+            }],
+            formatter: AdvancedLogFormatter {
+                formatter_type: FormatterType::Plain,
+                colored: Some(false),
+            },
+            emitter: AdvancedLogEmitter::File(FileEmitterConfig {
+                path: original_path_str.clone(),
+                encryption: None,
+            }),
+        }]);
+
+        // Init reloadable logging
+        ten_configure_log_reloadable(&config).unwrap();
+
+        // Write a few lines before rename
+        ten_log(
+            &config,
+            "test_reopen",
+            1,
+            1,
+            LogLevel::Info,
+            "before_fn",
+            "before.rs",
+            1,
+            "before-1",
+        );
+        ten_log(
+            &config,
+            "test_reopen",
+            1,
+            1,
+            LogLevel::Warn,
+            "before_fn",
+            "before.rs",
+            2,
+            "before-2",
+        );
+
+        // Give the background worker a brief moment
+        thread::sleep(Duration::from_millis(50));
+
+        // Rotate (rename) the current file; writer still holds FD to rotated
+        // file
+        std::fs::rename(&original_path, &rotated_path).expect("rename log file");
+
+        // Trigger reopen so that subsequent logs go to the original path again
+        ten_rust::log::ten_log_reopen_all(&mut config, true);
+
+        // Write more lines after reopen request
+        ten_log(
+            &config,
+            "test_reopen",
+            1,
+            1,
+            LogLevel::Info,
+            "after_fn",
+            "after.rs",
+            3,
+            "after-1",
+        );
+        ten_log(
+            &config,
+            "test_reopen",
+            1,
+            1,
+            LogLevel::Warn,
+            "after_fn",
+            "after.rs",
+            4,
+            "after-2",
+        );
+
+        // Force flush: disable all handlers to drop worker guard(s)
+        ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
+
+        // Validate: "before-*" in rotated file only
+        let rotated_content =
+            read_with_backoff(rotated_path.to_str().unwrap(), 0).expect("read rotated file");
+        println!("Rotated content:\n{rotated_content}");
+        assert!(rotated_content.contains("before-1"));
+        assert!(rotated_content.contains("before-2"));
+        assert!(!rotated_content.contains("after-1"));
+        assert!(!rotated_content.contains("after-2"));
+
+        // Validate: "after-*" in newly opened original path only
+        let new_content =
+            read_with_backoff(original_path.to_str().unwrap(), 0).expect("read new log file");
+        println!("New content:\n{new_content}");
+        assert!(new_content.contains("after-1"));
+        assert!(new_content.contains("after-2"));
+        assert!(!new_content.contains("before-1"));
+        assert!(!new_content.contains("before-2"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_file_emitter_encryption_simple() {
+        use tempfile::NamedTempFile;
+
+        // Create temp file for encrypted logs
+        let log_file = NamedTempFile::new().expect("Failed to create temp file");
+        let log_path = log_file.path().to_str().unwrap().to_string();
+
+        // Build encryption config
+        let encryption = EncryptionConfig {
+            enabled: Some(true),
+            algorithm: Some("AES-CTR".to_string()),
+            params: Some(EncryptionParams::AesCtr(AesCtrParams {
+                key: "0123456789ABCDEF".to_string(),
+                nonce: "FEDCBA9876543210".to_string(),
+            })),
+        };
+
+        let config = AdvancedLogConfig::new(vec![AdvancedLogHandler {
+            matchers: vec![AdvancedLogMatcher {
+                level: AdvancedLogLevel::Debug,
+                category: None,
+            }],
+            formatter: AdvancedLogFormatter {
+                formatter_type: FormatterType::Plain,
+                colored: Some(false),
+            },
+            emitter: AdvancedLogEmitter::File(FileEmitterConfig {
+                path: log_path.clone(),
+                encryption: Some(encryption.clone()),
+            }),
+        }]);
+
+        // Initialize logging
+        ten_configure_log_reloadable(&config).unwrap();
+
+        // Emit one message
+        let msg = "Secret message";
+        ten_log(
+            &config,
+            "test_category",
+            1,
+            1,
+            LogLevel::Info,
+            "encrypt_test",
+            "encrypt.rs",
+            1,
+            msg,
+        );
+        ten_log(
+            &config,
+            "test_category",
+            1234,
+            5678,
+            LogLevel::Warn,
+            "encrypt_test",
+            "encrypt.rs",
+            1,
+            "My card number is 1234567890",
+        );
+        ten_log(
+            &config,
+            "test_category",
+            1234,
+            5678,
+            LogLevel::Debug,
+            "encrypt_test",
+            "encrypt.rs",
+            1,
+            "My phone number is 9876543210",
+        );
+
+        // Force flush by reloading with empty config
+        ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
+
+        // Read file as bytes once (guard dropped ensures flush)
+        let bytes = std::fs::read(&log_path).expect("Failed to read log file bytes");
+        assert!(!bytes.is_empty(), "Encrypted log file should not be empty");
+
+        // Decrypt all records via helper module
+        let params_json = serde_json::to_string(&AesCtrParams {
+            key: "0123456789ABCDEF".to_string(),
+            nonce: "FEDCBA9876543210".to_string(),
+        })
+        .unwrap();
+        let decrypted_all = decrypt_records_bytes("AES-CTR", &params_json, &bytes)
+            .expect("decrypt_records_bytes should succeed");
+        let decrypted_text = String::from_utf8_lossy(&decrypted_all);
+
+        println!("Decrypted content:\n{decrypted_text}");
+        assert!(
+            decrypted_text.contains(msg),
+            "Decrypted content should contain original message"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn test_category_matchers_matching_messages() {
         use tempfile::NamedTempFile;
 
+        // Force flush logs
+        ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
+
         // Create a temporary log file that will be automatically removed when
         // dropped
-        let log_file =
-            NamedTempFile::new().expect("Failed to create temp file");
+        let log_file = NamedTempFile::new().expect("Failed to create temp file");
 
         let config = AdvancedLogConfig::new(vec![AdvancedLogHandler {
             matchers: vec![
@@ -601,6 +805,7 @@ mod tests {
             },
             emitter: AdvancedLogEmitter::File(FileEmitterConfig {
                 path: log_file.path().to_str().unwrap().to_string(),
+                encryption: None,
             }),
         }]);
 
@@ -616,9 +821,8 @@ mod tests {
         ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
 
         // Read and verify log file contents with backoff strategy
-        let log_content =
-            read_with_backoff(log_file.path().to_str().unwrap(), 10)
-                .expect("Failed to read log file after retries");
+        let log_content = read_with_backoff(log_file.path().to_str().unwrap(), 0)
+            .expect("Failed to read log file after retries");
 
         // Print log content for debugging
         println!("Log file content:\n{log_content}");
@@ -639,8 +843,7 @@ mod tests {
 
         // Create a temporary log file that will be automatically removed when
         // dropped
-        let log_file =
-            NamedTempFile::new().expect("Failed to create temp file");
+        let log_file = NamedTempFile::new().expect("Failed to create temp file");
 
         let config = AdvancedLogConfig::new(vec![AdvancedLogHandler {
             matchers: vec![
@@ -659,6 +862,7 @@ mod tests {
             },
             emitter: AdvancedLogEmitter::File(FileEmitterConfig {
                 path: log_file.path().to_str().unwrap().to_string(),
+                encryption: None,
             }),
         }]);
 
@@ -677,8 +881,7 @@ mod tests {
         debug!("Default category debug message");
 
         // Read and verify log file contents
-        let log_content = fs::read_to_string(log_file.path())
-            .expect("Failed to read log file");
+        let log_content = fs::read_to_string(log_file.path()).expect("Failed to read log file");
 
         // Verify non-matching messages are not logged
         assert!(!log_content.contains("Auth debug message"));
@@ -711,6 +914,7 @@ mod tests {
                 },
                 emitter: AdvancedLogEmitter::File(FileEmitterConfig {
                     path: auth_file.path().to_str().unwrap().to_string(),
+                    encryption: None,
                 }),
             },
             // Handler 2: Database logs (all levels) to db_file
@@ -725,6 +929,7 @@ mod tests {
                 },
                 emitter: AdvancedLogEmitter::File(FileEmitterConfig {
                     path: db_file.path().to_str().unwrap().to_string(),
+                    encryption: None,
                 }),
             },
         ]);
@@ -749,9 +954,8 @@ mod tests {
         ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
 
         // Read and verify auth file contents with backoff strategy
-        let auth_content =
-            read_with_backoff(auth_file.path().to_str().unwrap(), 5)
-                .expect("Failed to read auth log file after retries");
+        let auth_content = read_with_backoff(auth_file.path().to_str().unwrap(), 0)
+            .expect("Failed to read auth log file after retries");
 
         // Verify auth file contents
         assert!(
@@ -776,7 +980,7 @@ mod tests {
         );
 
         // Read and verify database file contents with backoff strategy
-        let db_content = read_with_backoff(db_file.path().to_str().unwrap(), 5)
+        let db_content = read_with_backoff(db_file.path().to_str().unwrap(), 0)
             .expect("Failed to read database log file after retries");
 
         println!("DB file content:\n{db_content}");
@@ -805,6 +1009,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_default_config_no_handlers() {
         let config_no_handlers = AdvancedLogConfig::new(vec![]);
 
@@ -823,6 +1028,204 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn test_file_reopen_with_frequent_logging() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
+
+        let dir = tempdir().expect("create temp dir");
+        let log_path = dir.path().join("frequent_test.log");
+        let log_path_str = log_path.to_str().unwrap().to_string();
+
+        let handler = AdvancedLogHandler {
+            matchers: vec![AdvancedLogMatcher {
+                level: AdvancedLogLevel::Info,
+                category: None,
+            }],
+            formatter: AdvancedLogFormatter {
+                formatter_type: FormatterType::Plain,
+                colored: Some(false),
+            },
+            emitter: AdvancedLogEmitter::File(FileEmitterConfig {
+                path: log_path_str.clone(),
+                encryption: None,
+            }),
+        };
+
+        let config = Arc::new(std::sync::Mutex::new(AdvancedLogConfig::new(vec![
+            handler.clone()
+        ])));
+
+        ten_configure_log_reloadable(&config.lock().unwrap()).unwrap();
+
+        let should_stop = Arc::new(AtomicBool::new(false));
+        let should_stop_clone = should_stop.clone();
+        let config_clone = config.clone();
+
+        let logging_thread = thread::spawn(move || {
+            let mut counter = 0;
+            while !should_stop_clone.load(Ordering::Relaxed) {
+                ten_log(
+                    &config_clone.lock().unwrap(),
+                    "test_frequent",
+                    1,
+                    1,
+                    LogLevel::Info,
+                    "test_fn",
+                    "test.rs",
+                    1,
+                    &format!("log message {counter}"),
+                );
+                counter += 1;
+                thread::sleep(Duration::from_micros(100));
+            }
+            counter
+        });
+
+        for _ in 0..5 {
+            thread::sleep(Duration::from_millis(100));
+            let mut guard = config.lock().unwrap();
+            ten_rust::log::ten_log_reopen_all(&mut guard, true);
+        }
+
+        should_stop.store(true, Ordering::Relaxed);
+        let total_logs = logging_thread.join().unwrap();
+
+        ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
+
+        let content = read_with_backoff(log_path.to_str().unwrap(), 0).expect("read log file");
+
+        println!("Log content:\n{content}");
+        println!("Total logs written: {total_logs}");
+
+        let mut found_logs = 0;
+        for line in content.lines() {
+            if line.contains("log message") {
+                found_logs += 1;
+            }
+        }
+
+        assert_eq!(
+            found_logs, total_logs,
+            "Some logs were lost during the reopen process"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_file_reopen_with_rename_and_frequent_logging() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
+
+        let dir = tempdir().expect("create temp dir");
+        let original_path = dir.path().join("rename_test.log");
+        let rotated_paths: Vec<String> = (0..3)
+            .map(|i| {
+                dir.path()
+                    .join(format!("rename_test.log.{i}"))
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        let original_path_str = original_path.to_str().unwrap().to_string();
+
+        let handler = AdvancedLogHandler {
+            matchers: vec![AdvancedLogMatcher {
+                level: AdvancedLogLevel::Info,
+                category: None,
+            }],
+            formatter: AdvancedLogFormatter {
+                formatter_type: FormatterType::Plain,
+                colored: Some(false),
+            },
+            emitter: AdvancedLogEmitter::File(FileEmitterConfig {
+                path: original_path_str.clone(),
+                encryption: None,
+            }),
+        };
+
+        let config = Arc::new(std::sync::Mutex::new(AdvancedLogConfig::new(vec![
+            handler.clone()
+        ])));
+
+        ten_configure_log_reloadable(&config.lock().unwrap()).unwrap();
+
+        let should_stop = Arc::new(AtomicBool::new(false));
+        let should_stop_clone = should_stop.clone();
+        let config_clone = config.clone();
+
+        let logging_thread = thread::spawn(move || {
+            let mut counter = 0;
+            while !should_stop_clone.load(Ordering::Relaxed) {
+                ten_log(
+                    &config_clone.lock().unwrap(),
+                    "test_rename",
+                    1,
+                    1,
+                    LogLevel::Info,
+                    "test_fn",
+                    "test.rs",
+                    1,
+                    &format!("log message {counter}"),
+                );
+                counter += 1;
+                thread::sleep(Duration::from_micros(100));
+            }
+            counter
+        });
+
+        for rotated_path in &rotated_paths {
+            thread::sleep(Duration::from_millis(100));
+
+            std::fs::rename(&original_path, rotated_path).expect("rename log file");
+
+            let mut guard = config.lock().unwrap();
+            ten_rust::log::ten_log_reopen_all(&mut guard, true);
+
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        should_stop.store(true, Ordering::Relaxed);
+        let total_logs = logging_thread.join().unwrap();
+
+        ten_configure_log_reloadable(&AdvancedLogConfig::new(vec![])).unwrap();
+
+        let mut all_content = String::new();
+
+        for rotated_path in &rotated_paths {
+            let content = read_with_backoff(rotated_path, 0).expect("read rotated log file");
+            all_content.push_str(&content);
+        }
+
+        let final_content =
+            read_with_backoff(original_path.to_str().unwrap(), 0).expect("read current log file");
+        all_content.push_str(&final_content);
+
+        println!("Combined log content:\n{all_content}");
+        println!("Total logs written: {total_logs}");
+
+        let mut found_logs = 0;
+        for line in all_content.lines() {
+            if line.contains("log message") {
+                found_logs += 1;
+            }
+        }
+
+        assert_eq!(
+            found_logs, total_logs,
+            "Some logs were lost during the rename and reopen process"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn test_actual_logging_output() {
         let config = AdvancedLogConfig::new(vec![AdvancedLogHandler {
             matchers: vec![AdvancedLogMatcher {
@@ -835,6 +1238,7 @@ mod tests {
             },
             emitter: AdvancedLogEmitter::Console(ConsoleEmitterConfig {
                 stream: StreamType::Stdout,
+                encryption: None,
             }),
         }]);
 

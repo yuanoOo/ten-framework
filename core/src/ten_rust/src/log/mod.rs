@@ -5,13 +5,18 @@
 // Refer to the "LICENSE" file in the root directory for more information.
 //
 pub mod bindings;
+pub mod decrypt;
+pub mod encryption;
+pub mod file_appender;
 pub mod formatter;
 pub mod reloadable;
 
-use serde::{Deserialize, Serialize};
 use std::{fmt, io};
+
+use serde::{Deserialize, Serialize};
 use tracing;
-use tracing_appender::{non_blocking, rolling};
+use tracing_appender::non_blocking;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::{
     fmt::{self as tracing_fmt},
     layer::SubscriberExt,
@@ -19,9 +24,11 @@ use tracing_subscriber::{
     Layer, Registry,
 };
 
-use crate::log::formatter::{
-    JsonConfig, JsonFieldNames, JsonFormatter, PlainFormatter,
-};
+use crate::log::encryption::{EncryptMakeWriter, EncryptionConfig};
+use crate::log::file_appender::FileAppenderGuard;
+use crate::log::formatter::{JsonConfig, JsonFieldNames, JsonFormatter, PlainFormatter};
+
+// Encryption types and writer are moved to `encryption.rs`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(from = "u8")]
 pub enum LogLevel {
@@ -121,11 +128,15 @@ pub enum StreamType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConsoleEmitterConfig {
     pub stream: StreamType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<EncryptionConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FileEmitterConfig {
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<EncryptionConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -153,7 +164,10 @@ pub struct AdvancedLogConfig {
 
 impl AdvancedLogConfig {
     pub fn new(handlers: Vec<AdvancedLogHandler>) -> Self {
-        Self { handlers, guards: Vec::new() }
+        Self {
+            handlers,
+            guards: Vec::new(),
+        }
     }
 
     pub fn add_guard(&mut self, guard: Box<dyn std::any::Any + Send + Sync>) {
@@ -191,81 +205,160 @@ fn create_layer_and_filter(
         }
     }
 
-    let filter = tracing_subscriber::EnvFilter::try_new(&filter_directive)
-        .unwrap_or_else(|_| {
-            tracing_subscriber::EnvFilter::new("info") // Default fallback to
-                                                       // info level
-        });
+    let filter = tracing_subscriber::EnvFilter::try_new(&filter_directive).unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new("info") // Default fallback to
+                                                   // info level
+    });
 
     // Create corresponding layer based on emitter type
     let layer_with_guard = match &handler.emitter {
         AdvancedLogEmitter::Console(console_config) => {
-            let layer = match (
-                &console_config.stream,
-                &handler.formatter.formatter_type,
-            ) {
+            let layer = match (&console_config.stream, &handler.formatter.formatter_type) {
                 (StreamType::Stdout, FormatterType::Plain) => {
                     let ansi = handler.formatter.colored.unwrap_or(false);
+                    let base_writer = io::stdout;
+                    let writer = if let Some(runtime) = console_config
+                        .encryption
+                        .as_ref()
+                        .and_then(|e| e.to_runtime())
+                    {
+                        BoxMakeWriter::new(EncryptMakeWriter {
+                            inner: base_writer,
+                            runtime,
+                        })
+                    } else {
+                        BoxMakeWriter::new(base_writer)
+                    };
                     tracing_fmt::Layer::new()
                         .event_format(PlainFormatter::new(ansi))
-                        .with_writer(io::stdout)
+                        .with_writer(writer)
                         .boxed()
                 }
                 (StreamType::Stderr, FormatterType::Plain) => {
                     let ansi = handler.formatter.colored.unwrap_or(false);
+                    let base_writer = io::stderr;
+                    let writer = if let Some(runtime) = console_config
+                        .encryption
+                        .as_ref()
+                        .and_then(|e| e.to_runtime())
+                    {
+                        BoxMakeWriter::new(EncryptMakeWriter {
+                            inner: base_writer,
+                            runtime,
+                        })
+                    } else {
+                        BoxMakeWriter::new(base_writer)
+                    };
                     tracing_fmt::Layer::new()
                         .event_format(PlainFormatter::new(ansi))
-                        .with_writer(io::stderr)
+                        .with_writer(writer)
                         .boxed()
                 }
                 (StreamType::Stdout, FormatterType::Json) => {
+                    let base_writer = io::stdout;
+                    let writer = if let Some(runtime) = console_config
+                        .encryption
+                        .as_ref()
+                        .and_then(|e| e.to_runtime())
+                    {
+                        BoxMakeWriter::new(EncryptMakeWriter {
+                            inner: base_writer,
+                            runtime,
+                        })
+                    } else {
+                        BoxMakeWriter::new(base_writer)
+                    };
                     tracing_fmt::Layer::new()
                         .event_format(JsonFormatter::new(JsonConfig {
                             ansi: handler.formatter.colored.unwrap_or(false),
                             pretty: false,
                             field_names: JsonFieldNames::default(),
                         }))
-                        .with_writer(io::stdout)
+                        .with_writer(writer)
                         .boxed()
                 }
                 (StreamType::Stderr, FormatterType::Json) => {
+                    let base_writer = io::stderr;
+                    let writer = if let Some(runtime) = console_config
+                        .encryption
+                        .as_ref()
+                        .and_then(|e| e.to_runtime())
+                    {
+                        BoxMakeWriter::new(EncryptMakeWriter {
+                            inner: base_writer,
+                            runtime,
+                        })
+                    } else {
+                        BoxMakeWriter::new(base_writer)
+                    };
                     tracing_fmt::Layer::new()
                         .event_format(JsonFormatter::new(JsonConfig {
                             ansi: handler.formatter.colored.unwrap_or(false),
                             pretty: false,
                             field_names: JsonFieldNames::default(),
                         }))
-                        .with_writer(io::stderr)
+                        .with_writer(writer)
                         .boxed()
                 }
             };
             LayerWithGuard { layer, guard: None }
         }
         AdvancedLogEmitter::File(file_config) => {
-            // Create file appender for file logging
-            let file_appender = rolling::never(".", &file_config.path);
-            let (non_blocking, guard) = non_blocking(file_appender);
+            // Create our reloadable file appender. It supports CAS-based
+            // reopen.
+            let appender = file_appender::ReloadableFileAppender::new(&file_config.path);
+            let (non_blocking, worker_guard) = non_blocking(appender.clone());
+            // keep both worker_guard and appender in a composite guard
+            let composite_guard = file_appender::FileAppenderGuard {
+                non_blocking_guard: worker_guard,
+                appender: appender.clone(),
+            };
 
             let layer = match handler.formatter.formatter_type {
                 FormatterType::Plain => {
+                    let writer = if let Some(runtime) =
+                        file_config.encryption.as_ref().and_then(|e| e.to_runtime())
+                    {
+                        BoxMakeWriter::new(EncryptMakeWriter {
+                            inner: non_blocking.clone(),
+                            runtime,
+                        })
+                    } else {
+                        BoxMakeWriter::new(non_blocking.clone())
+                    };
                     tracing_fmt::Layer::new()
                         .event_format(PlainFormatter::new(
                             handler.formatter.colored.unwrap_or(false),
                         )) // File output doesn't need colors
-                        .with_writer(non_blocking)
+                        .with_writer(writer)
                         .boxed()
                 }
-                FormatterType::Json => tracing_fmt::Layer::new()
-                    .event_format(JsonFormatter::new(JsonConfig {
-                        ansi: handler.formatter.colored.unwrap_or(false),
-                        pretty: false,
-                        field_names: JsonFieldNames::default(),
-                    }))
-                    .with_writer(non_blocking)
-                    .boxed(),
+                FormatterType::Json => {
+                    let writer = if let Some(runtime) =
+                        file_config.encryption.as_ref().and_then(|e| e.to_runtime())
+                    {
+                        BoxMakeWriter::new(EncryptMakeWriter {
+                            inner: non_blocking.clone(),
+                            runtime,
+                        })
+                    } else {
+                        BoxMakeWriter::new(non_blocking.clone())
+                    };
+                    tracing_fmt::Layer::new()
+                        .event_format(JsonFormatter::new(JsonConfig {
+                            ansi: handler.formatter.colored.unwrap_or(false),
+                            pretty: false,
+                            field_names: JsonFieldNames::default(),
+                        }))
+                        .with_writer(writer)
+                        .boxed()
+                }
             };
 
-            LayerWithGuard { layer, guard: Some(Box::new(guard)) }
+            LayerWithGuard {
+                layer,
+                guard: Some(Box::new(composite_guard)),
+            }
         }
     };
 
@@ -295,9 +388,7 @@ impl std::fmt::Display for LogInitError {
 
 impl std::error::Error for LogInitError {}
 
-fn ten_configure_log_non_reloadable(
-    config: &mut AdvancedLogConfig,
-) -> Result<(), LogInitError> {
+fn ten_configure_log_non_reloadable(config: &mut AdvancedLogConfig) -> Result<(), LogInitError> {
     let mut layers = Vec::with_capacity(config.handlers.len());
     let mut guards = Vec::new();
 
@@ -319,9 +410,12 @@ fn ten_configure_log_non_reloadable(
     }
 
     // Initialize the registry
-    tracing_subscriber::registry().with(layers).try_init().map_err(|_| {
-        LogInitError { message: "Logging system is already initialized" }
-    })
+    tracing_subscriber::registry()
+        .with(layers)
+        .try_init()
+        .map_err(|_| LogInitError {
+            message: "Logging system is already initialized",
+        })
 }
 
 /// Configure the logging system for production use
@@ -345,6 +439,24 @@ pub fn ten_configure_log(
         reloadable::ten_configure_log_reloadable(config)
     } else {
         ten_configure_log_non_reloadable(config)
+    }
+}
+
+/// Trigger reopen for all file appenders (applied on next write).
+/// - Non-reloadable: iterate current config guards and trigger
+///   `FileAppenderGuard`.
+/// - Reloadable: delegate to the reloadable log manager.
+pub fn ten_log_reopen_all(config: &mut AdvancedLogConfig, reloadable: bool) {
+    if reloadable {
+        reloadable::request_reopen_all_files();
+        return;
+    }
+
+    // Non-reloadable: iterate config.guards directly
+    for any_guard in config.guards.iter() {
+        if let Some(file_guard) = any_guard.downcast_ref::<FileAppenderGuard>() {
+            file_guard.request_reopen();
+        }
     }
 }
 

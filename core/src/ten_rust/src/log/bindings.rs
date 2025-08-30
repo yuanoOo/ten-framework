@@ -9,7 +9,7 @@ use std::{
     os::raw::c_char,
 };
 
-use crate::log::{ten_configure_log, AdvancedLogConfig};
+use crate::log::{ten_configure_log, ten_log_reopen_all, AdvancedLogConfig};
 
 /// Configure the log.
 ///
@@ -48,30 +48,25 @@ pub unsafe extern "C" fn ten_rust_create_log_config_from_json(
         Ok(log_config_json_str) => log_config_json_str,
         Err(e) => {
             if !err_msg.is_null() {
-                let err_msg_c_str = CString::new(format!(
-                    "Failed to convert log config to JSON: {e:?}"
-                ))
-                .unwrap();
+                let err_msg_c_str =
+                    CString::new(format!("Failed to convert log config to JSON: {e:?}")).unwrap();
                 *err_msg = err_msg_c_str.into_raw();
             }
             return std::ptr::null();
         }
     };
 
-    let log_config: AdvancedLogConfig =
-        match serde_json::from_str(log_config_json_str) {
-            Ok(log_config) => log_config,
-            Err(e) => {
-                if !err_msg.is_null() {
-                    let err_msg_c_str = CString::new(format!(
-                        "Failed to parse log config: {e:?}"
-                    ))
-                    .unwrap();
-                    *err_msg = err_msg_c_str.into_raw();
-                }
-                return std::ptr::null();
+    let log_config: AdvancedLogConfig = match serde_json::from_str(log_config_json_str) {
+        Ok(log_config) => log_config,
+        Err(e) => {
+            if !err_msg.is_null() {
+                let err_msg_c_str =
+                    CString::new(format!("Failed to parse log config: {e:?}")).unwrap();
+                *err_msg = err_msg_c_str.into_raw();
             }
-        };
+            return std::ptr::null();
+        }
+    };
 
     Box::into_raw(Box::new(log_config))
 }
@@ -88,6 +83,12 @@ pub extern "C" fn ten_rust_configure_log(
     err_msg: *mut *mut c_char,
 ) -> bool {
     if config.is_null() {
+        if !err_msg.is_null() {
+            let err_msg_c_str = CString::new("Log config is null").unwrap();
+            unsafe {
+                *err_msg = err_msg_c_str.into_raw();
+            }
+        }
         return false;
     }
 
@@ -110,6 +111,30 @@ pub extern "C" fn ten_rust_configure_log(
 
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn ten_rust_log_reopen_all(
+    config: *mut AdvancedLogConfig,
+    reloadable: bool,
+    err_msg: *mut *mut c_char,
+) -> bool {
+    if config.is_null() {
+        if !err_msg.is_null() {
+            let err_msg_c_str = CString::new("Log config is null").unwrap();
+            unsafe {
+                *err_msg = err_msg_c_str.into_raw();
+            }
+        }
+        return false;
+    }
+
+    let config = unsafe { &mut *config };
+
+    ten_log_reopen_all(config, reloadable);
+
+    true
+}
+
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn ten_rust_log(
     config: *const AdvancedLogConfig,
     category: *const c_char,
@@ -121,11 +146,7 @@ pub extern "C" fn ten_rust_log(
     line_no: u32,
     msg: *const c_char,
 ) {
-    if config.is_null()
-        || func_name.is_null()
-        || file_name.is_null()
-        || msg.is_null()
-    {
+    if config.is_null() || func_name.is_null() || file_name.is_null() || msg.is_null() {
         return;
     }
 
